@@ -1,5 +1,3 @@
-print "loading packed moonscript"
-
 package.preload['moonscript.parse'] = function()
   
   module("moonscript.parse", package.seeall)

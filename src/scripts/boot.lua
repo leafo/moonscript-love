@@ -184,12 +184,58 @@ end
 
 local is_fused_game = false
 
+local main_fnames = { "main.lua", "main.moon" }
+local function has_main()
+	for _, name in ipairs(main_fnames) do
+		if love.filesystem.exists(name) then
+			return true
+		end
+	end
+end
+
+local function love_moon_loader(name)
+    local name_path = name:gsub("%.", "/")..".moon"
+	if love.filesystem.exists(name_path) then
+		local text = love.filesystem.read(name_path)
+		local tree, err = moonscript.parse.string(text)
+		if not tree then
+			error("Parse error: " .. err)
+		end
+		local code, ltable, pos = moonscript.compile.tree(tree)
+		if not code then
+			error(moonscript.compile.format_error(ltable, pos, text))
+		end
+		moonscript.line_tables[name_path] = ltable
+		local runner
+		runner = function()
+			do
+				local _with_0 = code
+				code = nil
+				return _with_0
+			end
+		end
+		return load(runner, file_path)
+	end
+	return nil, "Could not find .moon file"
+end
+
+local function replace_moon_loader(func)
+	for i, loader in ipairs(package.loaders) do
+		if loader == moonscript.moon_loader then
+			package.loaders[i] = func
+		end
+	end
+end
+
+
 -- This can't be overriden.
 function love.boot()
 
 	-- This is absolutely needed.
 	require("love")
 	require("love.filesystem")
+	require("moonscript")
+	replace_moon_loader(love_moon_loader)
 
 	love.arg.parse_options()
 
@@ -209,7 +255,7 @@ function love.boot()
 		can_has_game = pcall(love.filesystem.setSource, full_source)
 	end
 
-	if can_has_game and not (love.filesystem.exists("main.lua") or love.filesystem.exists("conf.lua")) then
+	if can_has_game and not (has_main() or love.filesystem.exists("conf.lua")) then
 		no_game_code = true
 	end
 
@@ -303,7 +349,9 @@ function love.init()
 	if love.filesystem then
 		love.filesystem.setRelease(c.release and is_fused_game)
 		if c.identity then love.filesystem.setIdentity(c.identity) end
-		if love.filesystem.exists("main.lua") then require("main") end
+		if has_main() then
+			require("main")
+		end
 	end
 
 	if no_game_code then
