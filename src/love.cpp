@@ -60,6 +60,7 @@
 
 // Scripts
 #include "scripts/boot.lua.h"
+#include "scripts/moonscript.lua.h"
 
 #endif // LOVE_BUILD_EXE
 
@@ -285,6 +286,10 @@ int main(int argc, char ** argv)
 		lua_setfield(L, -2, "_exe");
 		lua_pop(L, 1);
 	}
+
+	// Moonscript
+	if (luaL_loadbuffer(L, (const char *)love::moonscript_lua, love::moonscript_lua_len, "moonscript.lua") == 0)
+		lua_call(L, 0, 0);
 
 	// Boot
 	if (luaL_loadbuffer(L, (const char *)love::boot_lua, sizeof(love::boot_lua), "boot.lua") == 0)
