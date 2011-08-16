@@ -1,3 +1,8 @@
+This is a clone of LÖVE copied from <https://bitbucket.org/rude/love/> with baked in MoonScript support.
+
+---------------
+
+
 LÖVE is an *awesome* framework you can use to make 2D games in Lua. It's free, open-source, and works on Windows, Mac OS X and Linux.
 
 Documentation
