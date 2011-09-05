@@ -226,12 +226,12 @@ namespace opengl
 
 	int w_newQuad(lua_State * L)
 	{
-		int x = luaL_checkint(L, 1);
-		int y = luaL_checkint(L, 2);
-		int w = luaL_checkint(L, 3);
-		int h = luaL_checkint(L, 4);
-		int sw = luaL_checkint(L, 5);
-		int sh = luaL_checkint(L, 6);
+		float x = (float) luaL_checknumber(L, 1);
+		float y = (float) luaL_checknumber(L, 2);
+		float w = (float) luaL_checknumber(L, 3);
+		float h = (float) luaL_checknumber(L, 4);
+		float sw = (float) luaL_checknumber(L, 5);
+		float sh = (float) luaL_checknumber(L, 6);
 
 		Quad * frame = instance->newQuad(x, y, w, h, sw, sh);
 
@@ -323,7 +323,12 @@ namespace opengl
 	{
 		Image * image = luax_checktype<Image>(L, 1, "Image", GRAPHICS_IMAGE_T);
 		int size = luaL_optint(L, 2, 1000);
-		int usage = luaL_optint(L, 3, SpriteBatch::USAGE_DYNAMIC);
+		SpriteBatch::UsageHint usage = SpriteBatch::USAGE_DYNAMIC;
+		if (lua_gettop(L) > 2)
+		{
+			if (!SpriteBatch::getConstant(luaL_checkstring(L, 3), usage))
+				usage = SpriteBatch::USAGE_DYNAMIC;
+		}
 		SpriteBatch * t = NULL;
 		try {
 			t = instance->newSpriteBatch(image, size, usage);
@@ -990,7 +995,11 @@ namespace opengl
 		float x = (float)luaL_checknumber(L, 2);
 		float y = (float)luaL_checknumber(L, 3);
 		float radius = (float)luaL_checknumber(L, 4);
-		int points = luaL_optint(L, 5, 10);
+		int points;
+		if (lua_gettop(L) > 4)
+			points = lua_tointeger(L, 5);
+		else
+			points = radius > 10 ? radius : 10;
 		instance->circle(mode, x, y, radius, points);
 		return 0;
 	}

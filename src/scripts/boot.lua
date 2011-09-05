@@ -398,7 +398,7 @@ function love.run()
 			end
 		end
 
-		if love.timer then love.timer.sleep(1) end
+		if love.timer then love.timer.sleep(0.001) end
 		if love.graphics then love.graphics.present() end
 
 	end
