@@ -1,5 +1,4 @@
 package.preload['moonscript.parse'] = function()
-  
   module("moonscript.parse", package.seeall)
   
   local util = require"moonscript.util"
@@ -30,13 +29,16 @@ package.preload['moonscript.parse'] = function()
   
   local White = S" \t\n"^0
   local _Space = S" \t"^0
-  local Break = S"\n"
+  local Break = P"\n"
   local Stop = Break + -1
   local Indent = C(S"\t "^0) / count_indent
   
   local Comment = P"--" * (1 - S"\n")^0 * #Stop
   local Space = _Space * Comment^-1
   local SomeSpace = S" \t"^1 * Comment^-1
+  
+  local SpaceBreak = Space * Break
+  local EmptyLine = SpaceBreak
   
   local _Name = C(R("az", "AZ", "__") * R("az", "AZ", "09", "__")^0)
   local Name = Space * _Name
@@ -52,7 +54,7 @@ package.preload['moonscript.parse'] = function()
   local Shebang = P"#!" * P(1 - Stop)^0
   
   local function wrap(fn)
-  	local env = getfenv(fi)
+  	local env = getfenv(fn)
   
   	return setfenv(fn, setmetatable({}, {
   		__index = function(self, name)
@@ -132,6 +134,11 @@ package.preload['moonscript.parse'] = function()
   			_indent:push(indent)
   			return true
   		end
+  	end
+  
+  	local function push_indent(str, pos, indent)
+  		_indent:push(indent)
+  		return true
   	end
   
   	local function pop_indent(str, pos)
@@ -245,11 +252,20 @@ package.preload['moonscript.parse'] = function()
   		return #left == #right
   	end
   
+  	-- :name in table literal
+  	local function self_assign(name)
+  		return {name, name}
+  	end
+  
+  	-- can't have P(false) because it causes preceding patterns not to run
+  	local Cut = P(function() return false end)
+  
   	local g = lpeg.P{
   		File,
   		File = Shebang^-1 * (Block + Ct""),
   		Block = Ct(Line * (Break^1 * Line)^0),
-  		Line = Cmt(Indent, check_indent) * Statement + Space * #Break,
+  		CheckIndent = Cmt(Indent, check_indent), -- validates line is in correct indent
+  		Line = CheckIndent * Statement + Space * #Break,
   
   		Statement = (Import + While + With + For + ForEach + Return
   			+ ClassDecl + Export + BreakLoop + Ct(ExpList) / flatten_or_mark"explist" * Space) * ((
@@ -258,11 +274,12 @@ package.preload['moonscript.parse'] = function()
   				CompInner / mark"comprehension"
   			) * Space)^-1 / wrap_decorator,
   
-  		EmptyLine = Space * Break,
-  		Body = Space^-1 * Break * EmptyLine^0 * InBlock + Ct(Statement),
+  		Body = Space^-1 * Break * EmptyLine^0 * InBlock + Ct(Statement), -- either a statement, or an indented block
   
-  		InBlock = #Cmt(Indent, advance_indent) * Block * OutBlock,
-  		OutBlock = Cmt("", pop_indent),
+  		Advance = #Cmt(Indent, advance_indent), -- Advances the indent, gives back whitespace for CheckIndent
+  		PushIndent = Cmt(Indent, push_indent),
+  		PopIndent = Cmt("", pop_indent),
+  		InBlock = Advance * Block * PopIndent,
   
   		Import = key"import" *  Ct(ImportNameList) * key"from" * Exp / mark"import", 
   		ImportName = (sym"\\" * Ct(Cc":" * Name) + Name),
@@ -277,8 +294,8 @@ package.preload['moonscript.parse'] = function()
   		With = key"with" * Exp * key"do"^-1 * Body / mark"with",
   
   		If = key"if" * Exp * key"then"^-1 * Body *
-  			((Break * Cmt(Indent, check_indent))^-1 * EmptyLine^0 * key"elseif" * Exp * key"then"^-1 * Body / mark"elseif")^0 *
-  			((Break * Cmt(Indent, check_indent))^-1 * EmptyLine^0 * key"else" * Body / mark"else")^-1 / mark"if",
+  			((Break * CheckIndent)^-1 * EmptyLine^0 * key"elseif" * Exp * key"then"^-1 * Body / mark"elseif")^0 *
+  			((Break * CheckIndent)^-1 * EmptyLine^0 * key"else" * Body / mark"else")^-1 / mark"if",
   
   		While = key"while" * Exp * key"do"^-1 * Body / mark"while",
   
@@ -294,7 +311,7 @@ package.preload['moonscript.parse'] = function()
   		CompClause = CompFor + key"when" * Exp / mark"when",
   
   		Assign = Ct(AssignableList) * sym"=" * (With + If + Ct(TableBlock + ExpListLow)) / mark"assign",
-  		Update = Assignable * ((sym"+=" + sym"-=" + sym"*=" + sym"/=" + sym"%=")/trim) * Exp / mark"update",
+  		Update = Assignable * ((sym"..=" + sym"+=" + sym"-=" + sym"*=" + sym"/=" + sym"%=")/trim) * Exp / mark"update",
   
   		-- we can ignore precedence for now
   		OtherOps = op"or" + op"and" + op"<=" + op">=" + op"~=" + op"!=" + op"==" + op".." + op"<" + op">",
@@ -317,12 +334,11 @@ package.preload['moonscript.parse'] = function()
   			sym"not" * Exp / mark"not" +
   			TableLit +
   			Comprehension +
-  			ColonChain * Ct(ExpList^0) / flatten_func + -- have precedence over open table
   			Assign + Update + FunLit + String +
   			Num,
   
-  		ChainValue =
-  			((Chain + DotChain + Callable) * Ct(ExpList^0)) / flatten_func,
+  		ChainValue = -- a function call or an object access
+  			((Chain + DotChain + Callable) * Ct(InvokeArgs^-1)) / flatten_func,
   
   		Value = pos(
   			SimpleValue +
@@ -346,10 +362,6 @@ package.preload['moonscript.parse'] = function()
   		Parens = sym"(" * Exp * sym")",
   
   		FnArgs = symx"(" * Ct(ExpList^-1) * sym")" + sym"!" * -P"=" * Ct"",
-  
-  		-- chain that starts with colon expression (for precedence over table literal)
-  		ColonChain = 
-  			Callable * (ColonCall * (ChainItem)^0 + ColonSuffix) / mark"chain",
   
   		-- a list of funcalls and indexs on a callable
   		Chain = Callable * (ChainItem^1 * ColonSuffix^-1 + ColonSuffix) / mark"chain",
@@ -381,20 +393,24 @@ package.preload['moonscript.parse'] = function()
   
   		TableValue = KeyValue + Ct(Exp),
   
-  		TableLit = sym"{" * White *
-  			Ct((TableValue * ((sym"," + Break) * White * TableValue)^0)^-1) * sym","^-1 *
-  			White * sym"}" / mark"table",
+  		TableLit = sym"{" * Ct(
+  				TableValueList^-1 * sym","^-1 *
+  				(SpaceBreak * TableLitLine * (sym","^-1 * SpaceBreak * TableLitLine)^0 * sym","^-1)^-1
+  			) * White * sym"}" / mark"table",
   
-  		TableBlockInner = Ct(KeyValueLine * (Break^1 * KeyValueLine)^0),
+  		TableValueList = TableValue * (sym"," * TableValue)^0,
+  		TableLitLine = PushIndent * ((TableValueList * PopIndent) + (PopIndent * Cut)) + Space,
   
-  		TableBlock = Break * #Cmt(Indent, advance_indent) * TableBlockInner * OutBlock / mark"table",
+  		-- the unbounded table
+  		TableBlockInner = Ct(KeyValueLine * (SpaceBreak^1 * KeyValueLine)^0),
+  		TableBlock = SpaceBreak^1 * Advance * TableBlockInner * PopIndent / mark"table",
   
   		ClassDecl = key"class" * Name * (key"extends" * Exp + C"")^-1 * TableBlock / mark"class",
   		Export = key"export" * Ct(NameList) / mark"export",
   
-  		KeyValue = Ct((SimpleName + sym"[" * Exp * sym"]") * symx":" * (Exp + TableBlock)),
+  		KeyValue = (sym":" * Name) / self_assign + Ct((SimpleName + sym"[" * Exp * sym"]") * symx":" * (Exp + TableBlock)),
   		KeyValueList = KeyValue * (sym"," * KeyValue)^0,
-  		KeyValueLine = Cmt(Indent, check_indent) * KeyValueList * sym","^-1,
+  		KeyValueLine = CheckIndent * KeyValueList * sym","^-1,
   
   		FnArgsDef = sym"(" * Ct(FnArgDefList^-1) *
   			(key"using" * Ct(NameList + Space * "nil") + Ct"") *
@@ -410,6 +426,10 @@ package.preload['moonscript.parse'] = function()
   		NameList = Name * (sym"," * Name)^0,
   		ExpList = Exp * (sym"," * Exp)^0,
   		ExpListLow = Exp * ((sym"," + sym";") * Exp)^0,
+  
+  		InvokeArgs = ExpList * (sym"," * SpaceBreak * Advance * ArgBlock)^-1,
+  		ArgBlock = ArgLine * (sym"," * SpaceBreak * ArgLine)^0 * PopIndent,
+  		ArgLine = CheckIndent * ExpList
   	}
   
   	return {
@@ -458,205 +478,197 @@ package.preload['moonscript.parse'] = function()
   
 end
 package.preload['moonscript.util'] = function()
-  
   module("moonscript.util", package.seeall)
-  
+  local concat = table.concat
   moon = {
-  	is_object = function(value)
-  		return type(value) == "table" and value.__class
-  	end,
-  	type = function(value)
-  		base_type = type(value)
-  		if base_type == "table" then
-  			cls = value.__class
-  			if cls then return cls end
-  		end
-  		return base_type
-  	end
+    is_object = function(value)
+      return type(value) == "table" and value.__class
+    end,
+    type = function(value)
+      local base_type = type(value)
+      if base_type == "table" then
+        local cls = value.__class
+        if cls then
+          return cls
+        end
+      end
+      return base_type
+    end
   }
-  
-  function pos_to_line(str, pos)
-  	local line = 1
-  	for _ in str:sub(1, pos):gmatch("\n") do
-  		line = line + 1
-  	end
-  	return line
+  pos_to_line = function(str, pos)
+    local line = 1
+    for _ in str:sub(1, pos):gmatch("\n") do
+      line = line + 1
+    end
+    return line
   end
-  
-  function get_closest_line(str, line_num)
-  	local line = get_line(str, line_num)
-  	if (not line or trim(line) == "") and line_num > 1 then
-  		return get_closest_line(str, line_num - 1)
-  	end
-  
-  	return line, line_num
+  get_closest_line = function(str, line_num)
+    local line = get_line(str, line_num)
+    if (not line or trim(line) == "") and line_num > 1 then
+      return get_closest_line(str, line_num - 1)
+    else
+      return line, line_num
+    end
   end
-  
-  function get_line(str, line_num)
-  	for line in str:gmatch("(.-)[\n$]") do
-  		if line_num == 1 then
-  			return line
-  		end
-  		line_num = line_num - 1
-  	end
+  get_line = function(str, line_num)
+    for line in str:gmatch("(.-)[\n$]") do
+      if line_num == 1 then
+        return line
+      end
+      line_num = line_num - 1
+    end
   end
-  
-  -- shallow copy
-  function clone(tbl)
-  	local out = {}
-  	for k,v in pairs(tbl) do
-  		out[k] = v
-  	end
-  	return out
+  reversed = function(seq)
+    return coroutine.wrap(function()
+      for i = #seq, 1, -1 do
+        coroutine.yield(i, seq[i])
+      end
+    end)
   end
-  
-  function map(tbl, fn)
-  	local out = {}
-  	for i,v in ipairs(tbl) do
-  		out[i] = fn(v)
-  	end
-  	return out
+  trim = function(str)
+    return str:match("^%s*(.-)%s*$")
   end
-  
-  function every(tbl, fn)
-  	for i=1,#tbl do
-  		local pass
-  		if fn then
-  			pass = fn(tbl[i])
-  		else
-  			pass = tbl[i]
-  		end
-  
-  		if not pass then return false end
-  	end
-  	return true
+  split = function(str, delim)
+    if str == "" then
+      return { }
+    end
+    str = str .. delim
+    return (function()
+      local _accum_0 = { }
+      local _len_0 = 0
+      for m in str:gmatch("(.-)" .. delim) do
+        _len_0 = _len_0 + 1
+        _accum_0[_len_0] = m
+      end
+      return _accum_0
+    end)()
   end
-  
-  function bind(obj, name)
-  	return function(...)
-  		return obj[name](obj, ...)
-  	end
+  dump = function(what)
+    local seen = { }
+    local _dump
+    _dump = function(what, depth)
+      if depth == nil then
+        depth = 0
+      end
+      local t = type(what)
+      if t == "string" then
+        return '"' .. what .. '"\n'
+      elseif t == "table" then
+        if seen[what] then
+          return "recursion(" .. tostring(what) .. ")...\n"
+        end
+        local _ = seen[what] == true
+        depth = depth + 1
+        local lines = (function()
+          local _accum_0 = { }
+          local _len_0 = 0
+          for k, v in pairs(what) do
+            local _value_0 = (" "):rep(depth * 4) .. "[" .. tostring(k) .. "] = " .. _dump(v, depth)
+            if _value_0 ~= nil then
+              _len_0 = _len_0 + 1
+              _accum_0[_len_0] = _value_0
+            end
+          end
+          return _accum_0
+        end)()
+        seen[what] = false
+        return "{\n" .. concat(lines) .. (" "):rep((depth - 1) * 4) .. "}\n"
+      else
+        return tostring(what) .. "\n"
+      end
+    end
+    return _dump(what)
   end
-  
-  function itwos(seq)
-  	n = 2
-  	return coroutine.wrap(function()
-  		for i = 1, #seq-n+1 do
-  			coroutine.yield(i, seq[i], i+1, seq[i+1])
-  		end
-  	end)
-  end
-  
-  function reversed(seq)
-  	return coroutine.wrap(function()
-  		for i=#seq,1,-1 do
-  			coroutine.yield(i, seq[i])
-  		end
-  	end)
-  end
-  
-  function dump(what)
-  	local seen = {}
-  	local function _dump(what, depth)
-  		depth = depth or 0
-  		local t = type(what)
-  
-  		if t == "string" then
-  			return '"'..what..'"\n'
-  		elseif t == "table" then
-  			if seen[what] then 
-  				return "recursion("..tostring(what)..")...\n"
-  			end
-  			seen[what] = true
-  
-  			depth = depth + 1
-  			out = "{\n"
-  			for k,v in pairs(what) do
-  				out = out..(" "):rep(depth*4).."["..tostring(k).."] = ".._dump(v, depth)
-  			end
-  
-  			seen[what] = false
-  
-  			return out .. (" "):rep((depth-1)*4) .. "}\n"
-  		else
-  			return tostring(what).."\n"
-  		end
-  	end
-  
-  	return _dump(what)
-  end
-  
-  function split(str, delim)
-  	if str == "" then return {} end
-  	str = str..delim
-  	local out = {}
-  	for m in str:gmatch("(.-)"..delim) do
-  		table.insert(out, m)
-  	end
-  	return out
-  end
-  
-  
-  function trim(str)
-  	return str:match("^%s*(.-)%s*$")
-  end
-  
-  
   
 end
 package.preload['moonscript.data'] = function()
-  
   module("moonscript.data", package.seeall)
-  
-  local stack_t = {}
-  local _stack_mt = { __index = stack_t, __tostring = function(self)
-  	return "<Stack {"..table.concat(self, ", ").."}>"
-  end}
-  
-  function stack_t:pop()
-  	return table.remove(self)
+  local concat = table.concat
+  ntype = function(node)
+    if type(node) ~= "table" then
+      return "value"
+    else
+      return node[1]
+    end
   end
-  
-  function stack_t:push(value)
-  	table.insert(self, value)
-  	return value
+  Set = function(items)
+    local self = { }
+    do
+      local _item_0 = items
+      for _index_0 = 1, #_item_0 do
+        local key = _item_0[_index_0]
+        self[key] = true
+      end
+    end
+    return self
   end
-  
-  function stack_t:top()
-  	return self[#self]
-  end
-  
-  function Stack(...)
-  	local self = setmetatable({}, _stack_mt)
-  
-  	for _, v in ipairs{...} do
-  		self:push(v)
-  	end
-  
-  	return self
-  end
-  
-  function Set(items)
-  	local self = {}
-  	for _,item in ipairs(items) do
-  		self[item] = true
-  	end
-  	return self
-  end
-  
-  -- find out the type of a node
-  function ntype(node)
-  	if type(node) ~= "table" then return "value" end
-  	return node[1]
-  end
-  
-  lua_keywords = Set{
-  	'and', 'break', 'do', 'else', 'elseif',
-  	'end', 'false', 'for', 'function', 'if',
-  	'in', 'local', 'nil', 'not', 'or',
-  	'repeat', 'return', 'then', 'true',
-  	'until', 'while'
-  }
+  Stack = (function(_parent_0)
+    local _base_0 = {
+      __tostring = function(self)
+        return "<Stack {" .. concat(self, ", ") .. "}>"
+      end,
+      pop = function(self)
+        return table.remove(self)
+      end,
+      push = function(self, value)
+        table.insert(self, value)
+        return value
+      end,
+      top = function(self)
+        return self[#self]
+      end
+    }
+    _base_0.__index = _base_0
+    if _parent_0 then
+      setmetatable(_base_0, getmetatable(_parent_0).__index)
+    end
+    local _class_0 = setmetatable({
+      __init = function(self, ...)
+        do
+          local _item_0 = {
+            ...
+          }
+          for _index_0 = 1, #_item_0 do
+            local v = _item_0[_index_0]
+            self:push(v)
+          end
+        end
+        return nil
+      end
+    }, {
+      __index = _base_0,
+      __call = function(mt, ...)
+        local self = setmetatable({}, _base_0)
+        mt.__init(self, ...)
+        return self
+      end
+    })
+    _base_0.__class = _class_0
+    return _class_0
+  end)()
+  lua_keywords = Set({
+    'and',
+    'break',
+    'do',
+    'else',
+    'elseif',
+    'end',
+    'false',
+    'for',
+    'function',
+    'if',
+    'in',
+    'local',
+    'nil',
+    'not',
+    'or',
+    'repeat',
+    'return',
+    'then',
+    'true',
+    'until',
+    'while'
+  })
   
 end
 package.preload['moonscript'] = function()
@@ -1257,7 +1269,6 @@ package.preload['moonscript.compile.value'] = function()
   module("moonscript.compile", package.seeall)
   local util = require("moonscript.util")
   local data = require("moonscript.data")
-  local dump = require("moonscript.dump")
   require("moonscript.compile.format")
   local ntype = data.ntype
   local concat, insert = table.concat, table.insert
@@ -1619,7 +1630,6 @@ package.preload['moonscript.compile.line'] = function()
   module("moonscript.compile", package.seeall)
   local util = require("moonscript.util")
   local data = require("moonscript.data")
-  local dump = require("moonscript.dump")
   require("moonscript.compile.format")
   require("moonscript.compile.types")
   local reversed = util.reversed
@@ -1735,7 +1745,7 @@ package.preload['moonscript.compile.line'] = function()
     end,
     update = function(self, node)
       local _, name, op, exp = unpack(node)
-      local op_final = op:match("(.)=")
+      local op_final = op:match("^(.+)=$")
       if not op_final then
         error("Unknown op: " .. op)
       end
@@ -2413,7 +2423,6 @@ package.preload['moonscript.compile.format'] = function()
   module("moonscript.compile", package.seeall)
   local util = require("moonscript.util")
   local data = require("moonscript.data")
-  local itwos = util.itwos
   local Set, ntype = data.Set, data.ntype
   local concat, insert = table.concat, table.insert
   indent_char = "  "
@@ -2498,35 +2507,52 @@ package.preload['moonscript.compile.format'] = function()
   
 end
 package.preload['moonscript.dump'] = function()
-  
   module("moonscript.dump", package.seeall)
-  
-  local function flat_value(op, depth)
-  	depth = depth or 1
-  
-  	if type(op) == "string" then return '"'..op..'"' end
-  	if type(op) ~= "table" then return tostring(op) end
-  	local items = {}
-  	for _, item in ipairs(op) do
-  		table.insert(items, flat_value(item, depth+1))
-  	end
-  
-  	local pos = op[-1]
-  
-  	return "{"..(pos and "["..pos.."] " or "")..table.concat(items, ", ").."}"
+  local flat_value
+  flat_value = function(op, depth)
+    if depth == nil then
+      depth = 1
+    end
+    if type(op) == "string" then
+      return '"' .. op .. '"'
+    end
+    if type(op) ~= "table" then
+      return tostring(op)
+    end
+    local items = (function()
+      local _accum_0 = { }
+      local _len_0 = 0
+      do
+        local _item_0 = op
+        for _index_0 = 1, #_item_0 do
+          local item = _item_0[_index_0]
+          _len_0 = _len_0 + 1
+          _accum_0[_len_0] = flat_value(item, depth + 1)
+        end
+      end
+      return _accum_0
+    end)()
+    local pos = op[-1]
+    return "{" .. (pos and "[" .. pos .. "] " or "") .. table.concat(items, ", ") .. "}"
   end
-  
-  function value(op)
-  	return flat_value(op)
+  value = function(op)
+    return flat_value(op)
   end
-  
-  function tree(block, depth)
-  	depth = depth or 0
-  	for _, op in ipairs(block) do
-  		print(flat_value(op))
-  	end
+  tree = function(block)
+    return (function()
+      local _accum_0 = { }
+      local _len_0 = 0
+      do
+        local _item_0 = block
+        for _index_0 = 1, #_item_0 do
+          local value = _item_0[_index_0]
+          _len_0 = _len_0 + 1
+          _accum_0[_len_0] = print(flat_value(value))
+        end
+      end
+      return _accum_0
+    end)()
   end
-  
   
 end
 package.preload['moonscript.errors'] = function()
@@ -2597,4 +2623,4 @@ package.preload['moonscript.errors'] = function()
   end
   
 end
-package.preload["moonscript"]()
+return package.preload["moonscript"]()
